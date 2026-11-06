@@ -1,4 +1,5 @@
 import { Money } from '../value-objects/money';
+import type { MoneyProps } from '../value-objects/money';
 import { TransactionStatus } from '../enums/transaction-status.enum';
 import { TransactionKind } from '../enums/transaction-kind.enum';
 
@@ -20,6 +21,21 @@ export interface WagerTransactionState {
   failureCode?: string;
   createdAt: Date;
   processedAt?: Date;
+  resultBalance?: MoneyProps;
+}
+
+export class InvalidTransactionStateError extends Error {
+  constructor(status: TransactionStatus, operation: string) {
+    super(`Cannot ${operation} a transaction in ${status} status`);
+    this.name = 'InvalidTransactionStateError';
+  }
+}
+
+export class InvalidWagerTransactionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidWagerTransactionError';
+  }
 }
 
 export class WagerTransaction {
@@ -41,6 +57,7 @@ export class WagerTransaction {
     private _failureCode: string | undefined,
     public readonly createdAt: Date,
     private _processedAt: Date | undefined,
+    private _resultBalance: Money | undefined,
   ) {}
 
   static create(props: {
@@ -58,6 +75,16 @@ export class WagerTransaction {
     referenceExternalTransactionId?: string;
     referenceTransactionId?: string;
   }): WagerTransaction {
+    if (
+      (props.kind === TransactionKind.Refund || props.kind === TransactionKind.Rollback) &&
+      !props.referenceExternalTransactionId
+    ) {
+      throw new InvalidWagerTransactionError(`${props.kind} requires a reference transaction`);
+    }
+    if (props.kind === TransactionKind.Opening && props.providerId !== 'INTERNAL') {
+      throw new InvalidWagerTransactionError('OPENING transactions are internal only');
+    }
+
     const now = new Date();
     return new WagerTransaction(
       props.id,
@@ -76,6 +103,7 @@ export class WagerTransaction {
       TransactionStatus.Pending,
       undefined,
       now,
+      undefined,
       undefined,
     );
   }
@@ -99,6 +127,7 @@ export class WagerTransaction {
       state.failureCode,
       state.createdAt,
       state.processedAt,
+      state.resultBalance ? Money.from(state.resultBalance) : undefined,
     );
   }
 
@@ -114,22 +143,34 @@ export class WagerTransaction {
     return this._processedAt;
   }
 
+  get resultBalance(): Money | undefined {
+    return this._resultBalance;
+  }
+
+  setResultBalance(balance: Money): void {
+    this._resultBalance = balance;
+  }
+
   markAsProcessed(now = new Date()): void {
+    this.assertCanTransition('mark as processed');
     this._status = TransactionStatus.Processed;
     this._processedAt = now;
   }
 
   markAsRejected(code: string, now = new Date()): void {
+    this.assertCanTransition('mark as rejected');
     this._status = TransactionStatus.Rejected;
     this._failureCode = code;
     this._processedAt = now;
   }
 
   markPendingReference(): void {
+    this.assertCanTransition('mark as pending reference');
     this._status = TransactionStatus.PendingReference;
   }
 
   markAsFailed(code: string, now = new Date()): void {
+    this.assertCanTransition('mark as failed');
     this._status = TransactionStatus.Failed;
     this._failureCode = code;
     this._processedAt = now;
@@ -149,5 +190,11 @@ export class WagerTransaction {
 
   matchesPayload(payloadHash: string): boolean {
     return this.payloadHash === payloadHash;
+  }
+
+  private assertCanTransition(operation: string): void {
+    if (this.isTerminal()) {
+      throw new InvalidTransactionStateError(this._status, operation);
+    }
   }
 }

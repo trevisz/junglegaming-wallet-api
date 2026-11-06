@@ -3,38 +3,69 @@ import {
   Inject,
   NotFoundException,
   ConflictException,
-  UnprocessableEntityException,
   BadRequestException,
 } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/core';
 import { WALLET_REPOSITORY, WAGER_TRANSACTION_REPOSITORY } from '../../infrastructure/database/database.module';
 import { WalletRepository } from '../../domain/repositories/wallet.repository';
 import { WagerTransactionRepository } from '../../domain/repositories/wager-transaction.repository';
-import { Money, MoneyProps } from '../../domain/value-objects/money';
+import { Money } from '../../domain/value-objects/money';
+import type { MoneyProps } from '../../domain/value-objects/money';
 import { WagerTransaction } from '../../domain/entities/wager-transaction';
+import { Wallet } from '../../domain/entities/wallet';
 import { TransactionKind } from '../../domain/enums/transaction-kind.enum';
 import { TransactionStatus } from '../../domain/enums/transaction-status.enum';
 import { LedgerDirection } from '../../domain/enums/ledger-direction.enum';
 import { OutboxService } from '../../infrastructure/outbox/outbox.service';
 import { computePayloadHash } from '../utils/canonical-hash.util';
+import { InboxService } from '../../infrastructure/messaging/inbox.service';
 import {
   WalletBalanceChanged,
   WagerTransactionProcessed,
   WagerTransactionRejected,
   WagerTransactionPendingReference,
 } from '../../domain/events/wagering.events';
+import { IsOptional, IsString, Matches, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
+import { BusinessMetricsService } from '../../infrastructure/observability/business-metrics.service';
+
+class WageringMoneyCommand {
+  @Matches(/^\d+(\.\d{1,2})?$/)
+  amount!: string;
+
+  @Matches(/^[A-Za-z]{3}$/)
+  currency!: string;
+}
 
 export class ProcessWageringTransactionCommand {
+  @IsOptional()
+  @IsString()
   idempotencyKey?: string;
+  @IsString()
   providerId!: string;
+  @IsString()
   externalTransactionId!: string;
+  @IsString()
   playerId!: string;
+  @IsString()
   walletId!: string;
+  @IsString()
   roundId!: string;
+  @IsString()
   gameId!: string;
+  @IsString()
   kind!: string;
+  @ValidateNested()
+  @Type(() => WageringMoneyCommand)
   money!: MoneyProps;
+  @IsOptional()
+  @IsString()
   referenceExternalTransactionId?: string;
+}
+
+export interface InboxContext {
+  consumerName: string;
+  messageId: string;
 }
 
 @Injectable()
@@ -43,10 +74,40 @@ export class ProcessWageringTransactionUseCase {
     @Inject(WALLET_REPOSITORY) private readonly walletRepo: WalletRepository,
     @Inject(WAGER_TRANSACTION_REPOSITORY) private readonly wagerTxRepo: WagerTransactionRepository,
     private readonly outboxService: OutboxService,
+    private readonly inboxService: InboxService,
     private readonly em: EntityManager,
+    private readonly metrics: BusinessMetricsService,
   ) {}
 
-  async execute(command: ProcessWageringTransactionCommand) {
+  async execute(command: ProcessWageringTransactionCommand, inboxContext?: InboxContext) {
+    const startedAt = performance.now();
+    try {
+      const result = await this.executeInternal(command, inboxContext);
+      if ('duplicateMessage' in result && result.duplicateMessage) {
+        this.metrics.duplicate('inbox');
+      } else if (result.idempotentReplay) {
+        this.metrics.duplicate('idempotency');
+      }
+      this.metrics.transaction(result.status, result.status === TransactionStatus.PendingReference ? undefined : {
+        transactionId: result.transactionId,
+        providerId: command.providerId,
+        externalTransactionId: command.externalTransactionId,
+        walletId: command.walletId,
+        correlationId: command.idempotencyKey ?? `${command.providerId}:${command.externalTransactionId}`,
+      });
+      return result;
+    } catch (error) {
+      const candidate = error as { code?: string; cause?: { code?: string } };
+      if (['55P03', '40P01'].includes(candidate.code ?? candidate.cause?.code ?? '')) {
+        this.metrics.lockConflict();
+      }
+      throw error;
+    } finally {
+      this.metrics.processingTime((performance.now() - startedAt) / 1_000);
+    }
+  }
+
+  private async executeInternal(command: ProcessWageringTransactionCommand, inboxContext?: InboxContext) {
     const idempotencyKey =
       command.idempotencyKey || `${command.providerId}:${command.externalTransactionId}`;
 
@@ -66,16 +127,32 @@ export class ProcessWageringTransactionUseCase {
     const payloadHash = computePayloadHash(canonicalData);
 
     const existingTx = await this.wagerTxRepo.findByIdempotencyKey(idempotencyKey);
-    if (existingTx) {
+    if (existingTx && existingTx.status !== TransactionStatus.PendingReference) {
       if (existingTx.payloadHash !== payloadHash) {
         throw new ConflictException('Idempotency key conflict with differing payload');
       }
 
       const wallet = await this.walletRepo.findById(existingTx.walletId);
+      if (inboxContext) {
+        const inserted = await this.em.transactional(() =>
+          this.inboxService.markProcessed(inboxContext.consumerName, inboxContext.messageId, payloadHash),
+        );
+        if (!inserted) {
+          return {
+            transactionId: existingTx.id,
+            status: existingTx.status,
+            balance: existingTx.resultBalance?.toJSON() ?? wallet?.balance.toJSON() ?? existingTx.amount.toJSON(),
+            failureCode: existingTx.failureCode,
+            idempotentReplay: true,
+            duplicateMessage: true,
+          };
+        }
+      }
       return {
         transactionId: existingTx.id,
         status: existingTx.status,
-        balance: wallet ? wallet.balance.toJSON() : existingTx.amount.toJSON(),
+        balance: existingTx.resultBalance?.toJSON() ?? wallet?.balance.toJSON() ?? existingTx.amount.toJSON(),
+        failureCode: existingTx.failureCode,
         idempotentReplay: true,
       };
     }
@@ -84,6 +161,29 @@ export class ProcessWageringTransactionUseCase {
     const kindUpper = command.kind.toUpperCase() as TransactionKind;
 
     return await this.em.transactional(async () => {
+      if (inboxContext) {
+        const inserted = await this.inboxService.markProcessed(
+          inboxContext.consumerName,
+          inboxContext.messageId,
+          payloadHash,
+        );
+        if (!inserted) {
+          const receivedTx = await this.wagerTxRepo.findByIdempotencyKey(idempotencyKey);
+          if (!receivedTx) {
+            throw new ConflictException('Inbox message was already processed without its wagering transaction');
+          }
+          const receivedWallet = await this.walletRepo.findById(receivedTx.walletId);
+          return {
+            transactionId: receivedTx.id,
+            status: receivedTx.status,
+            balance: receivedTx.resultBalance?.toJSON() ?? receivedWallet?.balance.toJSON() ?? receivedTx.amount.toJSON(),
+            failureCode: receivedTx.failureCode,
+            idempotentReplay: true,
+            duplicateMessage: true,
+          };
+        }
+      }
+
       const wallet = await this.walletRepo.findByIdWithLock(command.walletId);
       if (!wallet) {
         throw new NotFoundException(`Wallet ${command.walletId} not found`);
@@ -98,21 +198,22 @@ export class ProcessWageringTransactionUseCase {
       }
 
       const innerTx = await this.wagerTxRepo.findByIdempotencyKey(idempotencyKey);
-      if (innerTx) {
+      if (innerTx && innerTx.status !== TransactionStatus.PendingReference) {
         if (innerTx.payloadHash !== payloadHash) {
           throw new ConflictException('Idempotency key conflict with differing payload');
         }
         return {
           transactionId: innerTx.id,
           status: innerTx.status,
-          balance: wallet.balance.toJSON(),
+          balance: innerTx.resultBalance?.toJSON() ?? wallet.balance.toJSON(),
+          failureCode: innerTx.failureCode,
           idempotentReplay: true,
         };
       }
 
-      const txId = crypto.randomUUID();
-      const transaction = WagerTransaction.create({
-        id: txId,
+      const isReferenceRetry = innerTx?.status === TransactionStatus.PendingReference;
+      const transaction = innerTx ?? WagerTransaction.create({
+        id: crypto.randomUUID(),
         providerId: command.providerId,
         externalTransactionId: command.externalTransactionId,
         idempotencyKey,
@@ -129,6 +230,7 @@ export class ProcessWageringTransactionUseCase {
       if (kindUpper === TransactionKind.Bet || (kindUpper as string) === 'BET') {
         if (wallet.balance.isLessThan(money)) {
           transaction.markAsRejected('INSUFFICIENT_FUNDS');
+          transaction.setResultBalance(wallet.balance);
           await this.wagerTxRepo.save(transaction);
 
           this.outboxService.enqueue(
@@ -149,13 +251,20 @@ export class ProcessWageringTransactionUseCase {
             }),
           );
 
-          throw new UnprocessableEntityException('Insufficient wallet balance');
+          return {
+            transactionId: transaction.id,
+            status: transaction.status,
+            balance: wallet.balance.toJSON(),
+            failureCode: transaction.failureCode,
+            idempotentReplay: false,
+          };
         }
 
         const entryId = crypto.randomUUID();
         const balanceBefore = wallet.balance;
         const entry = wallet.debit(money, transaction.id, entryId);
         transaction.markAsProcessed();
+        transaction.setResultBalance(wallet.balance);
 
         await this.wagerTxRepo.save(transaction);
         await this.walletRepo.save(wallet, entry);
@@ -199,6 +308,7 @@ export class ProcessWageringTransactionUseCase {
         const balanceBefore = wallet.balance;
         const entry = wallet.credit(money, transaction.id, entryId);
         transaction.markAsProcessed();
+        transaction.setResultBalance(wallet.balance);
 
         await this.wagerTxRepo.save(transaction);
         await this.walletRepo.save(wallet, entry);
@@ -239,6 +349,7 @@ export class ProcessWageringTransactionUseCase {
         );
       } else if (kindUpper === TransactionKind.Loss || (kindUpper as string) === 'LOSS') {
         transaction.markAsProcessed();
+        transaction.setResultBalance(wallet.balance);
         await this.wagerTxRepo.save(transaction);
 
         this.outboxService.enqueue(
@@ -269,44 +380,41 @@ export class ProcessWageringTransactionUseCase {
         );
 
         if (!ref) {
-          transaction.markPendingReference();
-          await this.wagerTxRepo.save(transaction);
-
-          this.outboxService.enqueue(
-            new WagerTransactionPendingReference({
-              eventId: crypto.randomUUID(),
-              aggregateId: transaction.id,
-              correlationId: idempotencyKey,
-              data: {
-                transactionId: transaction.id,
-                providerId: command.providerId,
-                externalTransactionId: command.externalTransactionId,
-                referenceExternalTransactionId: command.referenceExternalTransactionId,
-                walletId: wallet.id,
-              },
-            }),
-          );
-
-          return {
-            transactionId: transaction.id,
-            status: TransactionStatus.PendingReference,
-            balance: wallet.balance.toJSON(),
-            idempotentReplay: false,
-          };
+          return this.handleMissingReference(transaction, idempotencyKey, money, wallet, isReferenceRetry);
         }
 
         if (ref.kind !== TransactionKind.Bet && (ref.kind as string) !== 'BET' && (ref.kind as string) !== 'WAGER') {
-          throw new BadRequestException('REFUND can only reference a BET transaction');
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'INVALID_REFERENCE_KIND');
+        }
+
+        if (ref.status !== TransactionStatus.Processed) {
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'REFERENCE_NOT_PROCESSED');
+        }
+
+        try {
+          this.assertSameReferenceContext(ref, wallet, command.roundId, money);
+        } catch {
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'REFERENCE_CONTEXT_MISMATCH');
+        }
+
+        const previousRefund = await this.wagerTxRepo.findByReferenceAndKind(
+          command.providerId,
+          command.referenceExternalTransactionId,
+          TransactionKind.Refund,
+        );
+        if (previousRefund) {
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'REFERENCE_ALREADY_REFUNDED');
         }
 
         if (!ref.amount.equals(money)) {
-          throw new BadRequestException('REFUND amount must match reference amount');
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'REFERENCE_AMOUNT_MISMATCH');
         }
 
         const entryId = crypto.randomUUID();
         const balanceBefore = wallet.balance;
         const entry = wallet.credit(money, transaction.id, entryId);
         transaction.markAsProcessed();
+        transaction.setResultBalance(wallet.balance);
 
         await this.wagerTxRepo.save(transaction);
         await this.walletRepo.save(wallet, entry);
@@ -356,36 +464,45 @@ export class ProcessWageringTransactionUseCase {
         );
 
         if (!ref) {
-          transaction.markPendingReference();
-          await this.wagerTxRepo.save(transaction);
-
-          this.outboxService.enqueue(
-            new WagerTransactionPendingReference({
-              eventId: crypto.randomUUID(),
-              aggregateId: transaction.id,
-              correlationId: idempotencyKey,
-              data: {
-                transactionId: transaction.id,
-                providerId: command.providerId,
-                externalTransactionId: command.externalTransactionId,
-                referenceExternalTransactionId: command.referenceExternalTransactionId,
-                walletId: wallet.id,
-              },
-            }),
-          );
-
-          return {
-            transactionId: transaction.id,
-            status: TransactionStatus.PendingReference,
-            balance: wallet.balance.toJSON(),
-            idempotentReplay: false,
-          };
+          return this.handleMissingReference(transaction, idempotencyKey, money, wallet, isReferenceRetry);
         }
 
         const isReferenceDebit =
           ref.kind === TransactionKind.Bet ||
           (ref.kind as string) === 'BET' ||
           (ref.kind as string) === 'WAGER';
+
+        if (
+          ref.kind !== TransactionKind.Bet &&
+          ref.kind !== TransactionKind.Wager &&
+          ref.kind !== TransactionKind.Win &&
+          ref.kind !== TransactionKind.Refund
+        ) {
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'INVALID_REFERENCE_KIND');
+        }
+
+        if (ref.status !== TransactionStatus.Processed) {
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'REFERENCE_NOT_PROCESSED');
+        }
+
+        try {
+          this.assertSameReferenceContext(ref, wallet, command.roundId, money);
+        } catch {
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'REFERENCE_CONTEXT_MISMATCH');
+        }
+
+        const previousRollback = await this.wagerTxRepo.findByReferenceAndKind(
+          command.providerId,
+          command.referenceExternalTransactionId,
+          TransactionKind.Rollback,
+        );
+        if (previousRollback) {
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'REFERENCE_ALREADY_ROLLED_BACK');
+        }
+
+        if (!ref.amount.equals(money)) {
+          return this.rejectTransaction(transaction, idempotencyKey, money, wallet, 'REFERENCE_AMOUNT_MISMATCH');
+        }
 
         const entryId = crypto.randomUUID();
         const balanceBefore = wallet.balance;
@@ -395,14 +512,19 @@ export class ProcessWageringTransactionUseCase {
           entry = wallet.credit(money, transaction.id, entryId);
         } else {
           if (wallet.balance.isLessThan(money)) {
-            transaction.markAsRejected('ROLLBACK_WOULD_CAUSE_NEGATIVE_BALANCE');
-            await this.wagerTxRepo.save(transaction);
-            throw new UnprocessableEntityException('Rollback would cause negative balance');
+            return this.rejectTransaction(
+              transaction,
+              idempotencyKey,
+              money,
+              wallet,
+              'ROLLBACK_WOULD_CAUSE_NEGATIVE_BALANCE',
+            );
           }
           entry = wallet.debit(money, transaction.id, entryId);
         }
 
         transaction.markAsProcessed();
+        transaction.setResultBalance(wallet.balance);
         await this.wagerTxRepo.save(transaction);
         await this.walletRepo.save(wallet, entry);
 
@@ -451,5 +573,115 @@ export class ProcessWageringTransactionUseCase {
         idempotentReplay: false,
       };
     });
+  }
+
+  private assertSameReferenceContext(
+    reference: WagerTransaction,
+    wallet: { id: string; playerId: string; currency: string },
+    roundId: string,
+    money: Money,
+  ): void {
+    if (
+      reference.walletId !== wallet.id ||
+      reference.playerId !== wallet.playerId ||
+      reference.roundId !== roundId ||
+      reference.amount.currency !== wallet.currency ||
+      reference.amount.currency !== money.currency
+    ) {
+      throw new BadRequestException('Reference transaction does not belong to this wallet, player, round, or currency');
+    }
+  }
+
+  private async handleMissingReference(
+    transaction: WagerTransaction,
+    correlationId: string,
+    money: Money,
+    wallet: Wallet,
+    isRetry: boolean,
+  ) {
+    if (isRetry && Date.now() - transaction.createdAt.getTime() >= 24 * 60 * 60 * 1_000) {
+      transaction.markAsRejected('REFERENCE_NOT_FOUND');
+      transaction.setResultBalance(wallet.balance);
+      await this.wagerTxRepo.save(transaction);
+      this.enqueueRejected(transaction, correlationId, money, 'REFERENCE_NOT_FOUND');
+      return {
+        transactionId: transaction.id,
+        status: transaction.status,
+        balance: wallet.balance.toJSON(),
+        idempotentReplay: false,
+      };
+    }
+
+    transaction.markPendingReference();
+    transaction.setResultBalance(wallet.balance);
+    await this.wagerTxRepo.save(transaction);
+    if (!isRetry) {
+      this.outboxService.enqueue(
+        new WagerTransactionPendingReference({
+          eventId: crypto.randomUUID(),
+          aggregateId: transaction.id,
+          correlationId,
+          data: {
+            transactionId: transaction.id,
+            providerId: transaction.providerId,
+            externalTransactionId: transaction.externalTransactionId,
+            referenceExternalTransactionId: transaction.referenceExternalTransactionId ?? '',
+            walletId: wallet.id,
+          },
+        }),
+      );
+    }
+
+    return {
+      transactionId: transaction.id,
+      status: TransactionStatus.PendingReference,
+      balance: wallet.balance.toJSON(),
+      idempotentReplay: false,
+    };
+  }
+
+  private enqueueRejected(
+    transaction: WagerTransaction,
+    correlationId: string,
+    money: Money,
+    failureCode: string,
+  ): void {
+    this.outboxService.enqueue(
+      new WagerTransactionRejected({
+        eventId: crypto.randomUUID(),
+        aggregateId: transaction.id,
+        correlationId,
+        data: {
+          transactionId: transaction.id,
+          providerId: transaction.providerId,
+          externalTransactionId: transaction.externalTransactionId,
+          walletId: transaction.walletId,
+          playerId: transaction.playerId,
+          kind: transaction.kind,
+          amount: money.toJSON(),
+          failureCode,
+        },
+      }),
+    );
+  }
+
+  private async rejectTransaction(
+    transaction: WagerTransaction,
+    correlationId: string,
+    money: Money,
+    wallet: Wallet,
+    failureCode: string,
+  ) {
+    transaction.markAsRejected(failureCode);
+    transaction.setResultBalance(wallet.balance);
+    await this.wagerTxRepo.save(transaction);
+    this.enqueueRejected(transaction, correlationId, money, failureCode);
+    return {
+      transactionId: transaction.id,
+      status: transaction.status,
+      balance: wallet.balance.toJSON(),
+      failureCode: transaction.failureCode,
+      idempotentReplay: false,
+    };
   }
 }

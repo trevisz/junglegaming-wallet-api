@@ -19,6 +19,7 @@ describe('Wager Concurrency & Idempotency E2E Test', () => {
   }
 
   beforeAll(async () => {
+    process.env.SQS_ENABLED = 'false';
     let running = false;
     try {
       const res = await fetch('http://localhost:3000/health/live');

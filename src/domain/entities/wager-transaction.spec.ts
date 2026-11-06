@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { WagerTransaction } from './wager-transaction';
+import { InvalidTransactionStateError, InvalidWagerTransactionError, WagerTransaction } from './wager-transaction';
 import { TransactionKind } from '../enums/transaction-kind.enum';
 import { TransactionStatus } from '../enums/transaction-status.enum';
 import { Money } from '../value-objects/money';
@@ -64,5 +64,61 @@ describe('WagerTransaction Entity', () => {
     expect(tx.status).toBe(TransactionStatus.Rejected);
     expect(tx.failureCode).toBe('INSUFFICIENT_FUNDS');
     expect(tx.isTerminal()).toBe(true);
+  });
+
+  it('should reject state changes after a terminal transition', () => {
+    const tx = WagerTransaction.create({
+      id: crypto.randomUUID(),
+      providerId: 'prv-1',
+      externalTransactionId: 'ext-terminal',
+      idempotencyKey: 'prv-1:ext-terminal',
+      payloadHash: 'hash123',
+      walletId: crypto.randomUUID(),
+      playerId: 'player-1',
+      roundId: 'round-1',
+      gameId: 'game-1',
+      kind: TransactionKind.Bet,
+      amount: Money.from({ amount: '50.00', currency: 'BRL' }),
+    });
+
+    tx.markAsProcessed();
+    expect(() => tx.markAsRejected('LATE_REJECTION')).toThrow(InvalidTransactionStateError);
+  });
+
+  it('should allow a pending reference to become processed later', () => {
+    const tx = WagerTransaction.create({
+      id: crypto.randomUUID(),
+      providerId: 'prv-1',
+      externalTransactionId: 'ext-pending-reference',
+      idempotencyKey: 'prv-1:ext-pending-reference',
+      payloadHash: 'hash123',
+      walletId: crypto.randomUUID(),
+      playerId: 'player-1',
+      roundId: 'round-1',
+      gameId: 'game-1',
+      kind: TransactionKind.Rollback,
+      amount: Money.from({ amount: '50.00', currency: 'BRL' }),
+      referenceExternalTransactionId: 'reference-1',
+    });
+
+    tx.markPendingReference();
+    tx.markAsProcessed();
+    expect(tx.status).toBe(TransactionStatus.Processed);
+  });
+
+  it('should require a reference for refund and rollback transactions', () => {
+    expect(() => WagerTransaction.create({
+      id: crypto.randomUUID(),
+      providerId: 'prv-1',
+      externalTransactionId: 'ext-ref-required',
+      idempotencyKey: 'prv-1:ext-ref-required',
+      payloadHash: 'hash123',
+      walletId: crypto.randomUUID(),
+      playerId: 'player-1',
+      roundId: 'round-1',
+      gameId: 'game-1',
+      kind: TransactionKind.Refund,
+      amount: Money.from({ amount: '50.00', currency: 'BRL' }),
+    })).toThrow(InvalidWagerTransactionError);
   });
 });

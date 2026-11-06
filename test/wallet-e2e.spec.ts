@@ -11,6 +11,7 @@ describe('Wallet Domain & Edge Cases E2E Test', () => {
   let app: INestApplication | null = null;
 
   beforeAll(async () => {
+    process.env.SQS_ENABLED = 'false';
     try {
       const res = await fetch('http://localhost:3000/health/live');
       if (res.ok) return;

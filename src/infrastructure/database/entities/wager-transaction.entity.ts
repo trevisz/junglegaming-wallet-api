@@ -59,4 +59,16 @@ export class WagerTransactionEntity {
 
   @Property({ fieldName: 'processed_at', type: 'datetime', nullable: true })
   processedAt?: Date;
+
+  @Property({ fieldName: 'reference_attempts', type: 'number', default: 0 })
+  referenceAttempts = 0;
+
+  @Property({ fieldName: 'next_reference_attempt_at', type: 'datetime', nullable: true })
+  nextReferenceAttemptAt?: Date;
+
+  @Property({ fieldName: 'result_balance_amount', type: 'decimal', precision: 20, scale: 2, nullable: true })
+  resultBalanceAmount?: string;
+
+  @Property({ fieldName: 'result_balance_currency', type: 'string', length: 3, nullable: true })
+  resultBalanceCurrency?: string;
 }

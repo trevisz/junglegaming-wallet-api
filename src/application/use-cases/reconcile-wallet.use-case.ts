@@ -3,6 +3,7 @@ import { WALLET_REPOSITORY } from '../../infrastructure/database/database.module
 import { WalletRepository } from '../../domain/repositories/wallet.repository';
 import { Money } from '../../domain/value-objects/money';
 import { LedgerDirection } from '../../domain/enums/ledger-direction.enum';
+import { BusinessMetricsService } from '../../infrastructure/observability/business-metrics.service';
 
 @Injectable()
 export class ReconcileWalletUseCase {
@@ -10,6 +11,7 @@ export class ReconcileWalletUseCase {
 
   constructor(
     @Inject(WALLET_REPOSITORY) private readonly walletRepo: WalletRepository,
+    private readonly metrics: BusinessMetricsService,
   ) {}
 
   async execute(walletId: string) {
@@ -34,14 +36,13 @@ export class ReconcileWalletUseCase {
     const difference = stored.subtract(calculated);
 
     if (!isConsistent) {
+      this.metrics.reconciliationMismatch();
       this.logger.error(
         JSON.stringify({
           level: 'error',
           message: 'Wallet reconciliation mismatch detected',
           walletId,
-          storedBalance: stored.toString(),
-          calculatedBalance: calculated.toString(),
-          difference: difference.toString(),
+          checkedEntries: entries.length,
         }),
       );
     }

@@ -1,5 +1,5 @@
 import { IntegrationEvent, IntegrationEventProps } from './integration-event';
-import { MoneyProps } from '../value-objects/money';
+import type { MoneyProps } from '../value-objects/money';
 import { LedgerDirection } from '../enums/ledger-direction.enum';
 
 export interface WalletBalanceChangedData {
