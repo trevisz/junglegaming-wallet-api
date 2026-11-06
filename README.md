@@ -68,6 +68,12 @@ AWS_REGION=us-east-1
 
 Use `.env.example` como base para a configuracao local. Em AWS, remova `SQS_ENDPOINT`, configure as URLs das tres filas e forneca credenciais por IAM role ou pela cadeia padrao do AWS SDK.
 
+Crie o arquivo `.env` a partir do exemplo antes de iniciar a aplicacao:
+
+```powershell
+Copy-Item .env.example .env
+```
+
 Na primeira conexao, a aplicacao cria as filas FIFO `wager-transactions.fifo`, `wager-transactions-dlq.fifo` e `wager-events.fifo` no MiniStack. Mensagens invalidas vao para a DLQ; mensagens com falha transitoria sao tentadas novamente pela politica de redrive.
 
 ### 4.3. Executar as migrations do banco de dados
@@ -223,7 +229,7 @@ Na rota unificada, `200` indica processamento/replay concluido, `202` indica ref
 ### 5.3. Health Checks
 
 - **Liveness probe**: `GET /health/live` (informa se a aplicacao esta ativa)
-- **Readiness probe**: `GET /health/ready` (valida PostgreSQL e, quando habilitado, SQS)
+- **Readiness probe**: `GET /health/ready` (valida PostgreSQL e SQS; ambos devem estar acessiveis)
 
 ---
 
