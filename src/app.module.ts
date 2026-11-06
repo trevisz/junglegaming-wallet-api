@@ -12,13 +12,13 @@ import { CreateWalletUseCase } from './application/use-cases/create-wallet.use-c
 import { GetWalletUseCase } from './application/use-cases/get-wallet.use-case';
 import { GetWalletLedgerUseCase } from './application/use-cases/get-wallet-ledger.use-case';
 import { ReconcileWalletUseCase } from './application/use-cases/reconcile-wallet.use-case';
-import { ProcessWageringTransactionUseCase } from './application/use-cases/process-wagering-transaction.use-case';
 import { GetWageringTransactionUseCase } from './application/use-cases/get-wagering-transaction.use-case';
-import { OutboxService } from './infrastructure/outbox/outbox.service';
 import { WagerController } from './presentation/controllers/wager.controller';
 import { WalletController } from './presentation/controllers/wallet.controller';
 import { WageringController } from './presentation/controllers/wagering.controller';
 import { HealthController } from './presentation/controllers/health.controller';
+import { MessagingModule } from './infrastructure/messaging/messaging.module';
+import { ProviderIdentityGuard } from './presentation/guards/provider-identity.guard';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -30,6 +30,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
       serviceId: 'wagering-processor',
     }),
     DatabaseModule,
+    MessagingModule,
   ],
   controllers: [
     AppController,
@@ -40,7 +41,6 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
   ],
   providers: [
     AppService,
-    OutboxService,
     ProcessWagerUseCase,
     ProcessWinUseCase,
     ProcessRollbackUseCase,
@@ -50,8 +50,8 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     GetWalletUseCase,
     GetWalletLedgerUseCase,
     ReconcileWalletUseCase,
-    ProcessWageringTransactionUseCase,
     GetWageringTransactionUseCase,
+    ProviderIdentityGuard,
   ],
 })
 export class AppModule {}

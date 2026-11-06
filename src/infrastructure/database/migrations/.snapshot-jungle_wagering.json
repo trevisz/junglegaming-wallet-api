@@ -417,6 +417,22 @@
           "collation": null,
           "enumItems": []
         },
+        "next_reference_attempt_at": {
+          "name": "next_reference_attempt_at",
+          "type": "timestamptz(6)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": []
+        },
         "payload_hash": {
           "name": "payload_hash",
           "type": "varchar(64)",
@@ -481,6 +497,22 @@
           "collation": null,
           "enumItems": []
         },
+        "reference_attempts": {
+          "name": "reference_attempts",
+          "type": "int",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": 32,
+          "scale": 0,
+          "default": "0",
+          "comment": null,
+          "collation": null,
+          "enumItems": []
+        },
         "reference_external_transaction_id": {
           "name": "reference_external_transaction_id",
           "type": "varchar(255)",
@@ -506,6 +538,38 @@
           "nullable": true,
           "unique": false,
           "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": []
+        },
+        "result_balance_amount": {
+          "name": "result_balance_amount",
+          "type": "numeric(20,2)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": 20,
+          "scale": 2,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": []
+        },
+        "result_balance_currency": {
+          "name": "result_balance_currency",
+          "type": "varchar(3)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 3,
           "precision": null,
           "scale": null,
           "default": null,
@@ -626,7 +690,32 @@
           "unique": true
         }
       ],
-      "checks": [],
+      "checks": [
+        {
+          "name": "chk_wager_amount_nonnegative",
+          "expression": "amount >= 0",
+          "definition": "CHECK ((amount >= (0)::numeric))",
+          "columnName": "amount"
+        },
+        {
+          "name": "chk_wager_result_balance_currency",
+          "expression": "(result_balance_currency IS NULL) OR (result_balance_currency = currency)",
+          "definition": "CHECK (((result_balance_currency IS NULL) OR ((result_balance_currency)::text = (currency)::text)))",
+          "columnName": "currency"
+        },
+        {
+          "name": "chk_wager_result_balance_nonnegative",
+          "expression": "(result_balance_amount IS NULL) OR (result_balance_amount >= 0)",
+          "definition": "CHECK (((result_balance_amount IS NULL) OR (result_balance_amount >= (0)::numeric)))",
+          "columnName": "result_balance_amount"
+        },
+        {
+          "name": "chk_wager_result_balance_pair",
+          "expression": "(result_balance_amount IS NULL) = (result_balance_currency IS NULL)",
+          "definition": "CHECK (((result_balance_amount IS NULL) = (result_balance_currency IS NULL)))",
+          "columnName": "result_balance_amount"
+        }
+      ],
       "triggers": [],
       "foreignKeys": {
         "wager_transactions_reference_transaction_id_fkey": {
@@ -778,13 +867,16 @@
           "primary": false,
           "nullable": false,
           "unique": false,
-          "length": 10,
+          "length": null,
           "precision": null,
           "scale": null,
           "default": null,
           "comment": null,
           "collation": null,
-          "enumItems": []
+          "enumItems": [
+            "DEBIT",
+            "CREDIT"
+          ]
         },
         "id": {
           "name": "id",
@@ -877,8 +969,44 @@
           "unique": true
         }
       ],
-      "checks": [],
-      "triggers": [],
+      "checks": [
+        {
+          "name": "chk_ledger_amount_nonnegative",
+          "expression": "amount >= 0",
+          "definition": "CHECK ((amount >= (0)::numeric))",
+          "columnName": "amount"
+        },
+        {
+          "name": "chk_ledger_balance_math",
+          "expression": "((direction = 'CREDIT'::text) AND ((balance_before_amount + amount) = balance_after_amount)) OR ((direction = 'DEBIT'::text) AND ((balance_before_amount - amount) = balance_after_amount))",
+          "definition": "CHECK (((((direction)::text = 'CREDIT'::text) AND ((balance_before_amount + amount) = balance_after_amount)) OR (((direction)::text = 'DEBIT'::text) AND ((balance_before_amount - amount) = balance_after_amount))))",
+          "columnName": "amount"
+        },
+        {
+          "name": "chk_ledger_currency_consistent",
+          "expression": "(balance_before_currency = currency) AND (balance_after_currency = currency)",
+          "definition": "CHECK ((((balance_before_currency)::text = (currency)::text) AND ((balance_after_currency)::text = (currency)::text)))",
+          "columnName": "balance_after_currency"
+        },
+        {
+          "name": "chk_ledger_direction",
+          "expression": "\"direction\" in ('DEBIT', 'CREDIT')",
+          "definition": "check (\"direction\" in ('DEBIT', 'CREDIT'))",
+          "columnName": "direction"
+        }
+      ],
+      "triggers": [
+        {
+          "name": "wallet_ledger_no_update_or_delete",
+          "timing": "before",
+          "events": [
+            "delete",
+            "update"
+          ],
+          "forEach": "row",
+          "body": ""
+        }
+      ],
       "foreignKeys": {
         "wallet_ledger_entries_transaction_id_fkey": {
           "columnNames": [
@@ -1067,6 +1195,12 @@
           "expression": "balance_amount >= 0",
           "definition": "CHECK ((balance_amount >= (0)::numeric))",
           "columnName": "balance_amount"
+        },
+        {
+          "name": "chk_wallet_currency_consistent",
+          "expression": "balance_currency = currency",
+          "definition": "CHECK (((balance_currency)::text = (currency)::text))",
+          "columnName": "balance_currency"
         }
       ],
       "triggers": [],

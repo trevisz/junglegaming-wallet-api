@@ -1,5 +1,6 @@
 import { LedgerDirection } from '../enums/ledger-direction.enum';
-import { Money, MoneyProps } from '../value-objects/money';
+import { Money } from '../value-objects/money';
+import type { MoneyProps } from '../value-objects/money';
 
 export interface CreateLedgerEntryProps {
   id: string;

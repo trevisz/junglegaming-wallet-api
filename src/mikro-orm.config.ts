@@ -1,5 +1,9 @@
 import { Options, defineConfig } from '@mikro-orm/postgresql';
 import { Migration20261105000000 } from './infrastructure/database/migrations/Migration20261105000000';
+import { Migration20261106000001 } from './infrastructure/database/migrations/Migration20261106000001';
+import { Migration20261106000002 } from './infrastructure/database/migrations/Migration20261106000002';
+import { Migration20261106000003 } from './infrastructure/database/migrations/Migration20261106000003';
+import { Migration20261106000004 } from './infrastructure/database/migrations/Migration20261106000004';
 import { WalletEntity } from './infrastructure/database/entities/wallet.entity';
 import { WagerTransactionEntity } from './infrastructure/database/entities/wager-transaction.entity';
 import { WalletLedgerEntryEntity } from './infrastructure/database/entities/wallet-ledger-entry.entity';
@@ -29,6 +33,22 @@ const config: Options = defineConfig({
       {
         name: 'Migration20261105000000',
         class: Migration20261105000000,
+      },
+      {
+        name: 'Migration20261106000001',
+        class: Migration20261106000001,
+      },
+      {
+        name: 'Migration20261106000002',
+        class: Migration20261106000002,
+      },
+      {
+        name: 'Migration20261106000003',
+        class: Migration20261106000003,
+      },
+      {
+        name: 'Migration20261106000004',
+        class: Migration20261106000004,
       },
     ],
   },

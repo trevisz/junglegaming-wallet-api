@@ -11,6 +11,21 @@ export class DomainExceptionFilter implements ExceptionFilter {
   catch(exception: any, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
+    const exceptionResponse = typeof exception.getResponse === 'function'
+      ? exception.getResponse()
+      : exception.response;
+
+    if (
+      exceptionResponse &&
+      typeof exceptionResponse === 'object' &&
+      ['REJECTED', 'PENDING_REFERENCE'].includes(exceptionResponse.status)
+    ) {
+      const status = typeof exception.getStatus === 'function'
+        ? exception.getStatus()
+        : HttpStatus.INTERNAL_SERVER_ERROR;
+      response.status(status).json({ ...exceptionResponse, statusCode: status });
+      return;
+    }
 
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let errorCode = 'INTERNAL_ERROR';

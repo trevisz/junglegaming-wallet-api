@@ -28,7 +28,7 @@ O sistema atua como motor transacional para plataformas de cassino online, garan
 - **Banco de Dados**: PostgreSQL 15
 - **Precisao Monetaria**: Decimal.js
 - **Linter de Alta Performance**: Oxlint
-- **Orquestracao Local**: Docker Compose (PostgreSQL e LocalStack SQS)
+- **Orquestracao Local**: Docker Compose (PostgreSQL e MiniStack com SQS)
 
 ---
 
@@ -47,7 +47,7 @@ O sistema atua como motor transacional para plataformas de cassino online, garan
 bun install
 ```
 
-### 4.2. Subir os servicos de infraestrutura (PostgreSQL e LocalStack)
+### 4.2. Subir os servicos de infraestrutura (PostgreSQL e MiniStack)
 
 ```bash
 docker compose up -d
@@ -57,6 +57,18 @@ O container do PostgreSQL ficara acessivel na porta `5432` com as credenciais pa
 - Usuario: `postgres`
 - Senha: `postgres`
 - Banco de dados: `jungle_wagering`
+
+Para habilitar o consumidor e o publisher SQS local, configure estas variaveis no ambiente da aplicacao (por exemplo, em `.env`):
+
+```env
+SQS_ENABLED=true
+SQS_ENDPOINT=http://localhost:4566
+AWS_REGION=us-east-1
+```
+
+Use `.env.example` como base para a configuracao local. Em AWS, remova `SQS_ENDPOINT`, configure as URLs das tres filas e forneca credenciais por IAM role ou pela cadeia padrao do AWS SDK.
+
+Na primeira conexao, a aplicacao cria as filas FIFO `wager-transactions.fifo`, `wager-transactions-dlq.fifo` e `wager-events.fifo` no MiniStack. Mensagens invalidas vao para a DLQ; mensagens com falha transitoria sao tentadas novamente pela politica de redrive.
 
 ### 4.3. Executar as migrations do banco de dados
 
@@ -198,6 +210,8 @@ Tipos de operacao suportados no campo `kind`:
 - `REFUND`: Reverte uma operacao `BET` atraves de um credito equivalente, exigindo `referenceExternalTransactionId`.
 - `ROLLBACK`: Reverte uma operacao anterior (`BET`, `WIN` ou `REFUND`) aplicando a direcao inversa.
 
+Na rota unificada, `200` indica processamento/replay concluido, `202` indica referencia pendente, `409` indica conflito de idempotencia, `422` indica rejeicao de negocio e `400` indica entrada invalida. Falhas transitorias de infraestrutura permanecem como respostas `5xx` para permitir retry pelo cliente.
+
 #### Consultar Transacao por ID Interno
 - **Rota**: `GET /wagering/transactions/:transactionId`
 
@@ -209,18 +223,38 @@ Tipos de operacao suportados no campo `kind`:
 ### 5.3. Health Checks
 
 - **Liveness probe**: `GET /health/live` (informa se a aplicacao esta ativa)
-- **Readiness probe**: `GET /health/ready` (valida a conectividade ativa com o PostgreSQL)
+- **Readiness probe**: `GET /health/ready` (valida PostgreSQL e, quando habilitado, SQS)
 
 ---
 
 ## 6. Testes e Qualidade de Codigo
 
-### Executar Testes Unitarios
-Executa os testes das entidades de dominio, regras de Money, imutabilidade do ledger e funcoes de hash canonico:
+### Executar a suite rapida
+Executa os testes de dominio e os cenarios HTTP de concorrencia/idempotencia:
 
 ```bash
-bun test src
+bun run test
 ```
+
+### Executar testes de integracao com PostgreSQL e SQS reais
+Suba PostgreSQL e MiniStack, aplique as migrations no banco isolado de integracao e habilite a suite:
+
+```powershell
+$env:DB_NAME = "jungle_wagering_integration"
+$env:SQS_ENABLED = "true"
+$env:SQS_ENDPOINT = "http://localhost:4566"
+$env:AWS_REGION = "us-east-1"
+$env:RUN_INFRA_INTEGRATION = "true"
+bun run migration:up
+bun run test:integration
+```
+
+A suite sobe tres processos da aplicacao e usa filas FIFO exclusivas. Ela verifica 50 entregas SQS duplicadas, 50 requisicoes HTTP idempotentes em paralelo, disputa de saldo, wallets paralelas, BET/WIN/LOSS/REFUND/ROLLBACK, conflito de moeda, rollback fora de ordem, Outbox, reinicio/redelivery, retries com falha transitoria, DLQ e constraints do schema. Fora do modo de integracao, esses testes ficam ignorados.
+
+### Testes manuais via Postman
+Importe `postman/JungleGaming-Wallet-API.postman_collection.json`, confirme `baseUrl` como `http://localhost:3000` e rode a colecao na ordem. A API deve estar iniciada com PostgreSQL e SQS habilitados; a colecao valida wallet, idempotencia, operacoes financeiras, rejeicoes, ledger e reconciliacao.
+
+Para habilitar o envio das metricas de negocio ao NestJS Observe, execute `npx @nestjs/observe link` e mantenha as credenciais fora do repositorio.
 
 ### Analise Estatica e Linting
 Executa a validacao estatica em alta velocidade com Oxlint:
@@ -257,6 +291,7 @@ src/
 │   │   ├── entities/        # Mapeamentos e decoradores MikroORM
 │   │   ├── migrations/      # Migrations SQL versionadas
 │   │   └── repositories/    # Implementacoes de repositorio com locks
+│   ├── messaging/           # Consumidor SQS, Inbox, DLQ e workers
 │   └── outbox/              # Servico transacional de despacho de outbox
 └── presentation/
     ├── controllers/         # Endpoints REST (Wallets, Wagering, Health)
