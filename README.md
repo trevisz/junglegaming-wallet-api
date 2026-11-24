@@ -41,11 +41,25 @@ O sistema atua como motor transacional para plataformas de cassino online, garan
 
 ## 4. Instalacao e Execucao
 
-### 4.1. Clonar o repositorio e instalar dependencias
+### 4.1. Clonar o repositorio, instalar dependencias e configurar o ambiente
 
 ```bash
 bun install
 ```
+
+Crie o arquivo local `.env` antes de iniciar os servicos:
+
+**Windows PowerShell:**
+```powershell
+Copy-Item .env.example .env
+```
+
+**Linux/macOS:**
+```bash
+cp .env.example .env
+```
+
+Preencha `DB_PASSWORD` com uma senha forte para o PostgreSQL e `HMAC_SECRET` com um segredo forte para validar as assinaturas dos provedores. O arquivo `.env` e ignorado pelo Git.
 
 ### 4.2. Subir os servicos de infraestrutura (PostgreSQL e MiniStack)
 
@@ -53,12 +67,12 @@ bun install
 docker compose up -d
 ```
 
-O container do PostgreSQL ficara acessivel na porta `5432` com as credenciais padrao:
-- Usuario: `postgres`
-- Senha: definida em DB_PASSWORD
-- Banco de dados: `jungle_wagering`
+O PostgreSQL ficara acessivel na porta `5432` com:
+- Usuario: valor de `DB_USER` (por padrao, `postgres`)
+- Senha: valor definido localmente em `DB_PASSWORD`
+- Banco de dados: valor de `DB_NAME` (por padrao, `jungle_wagering`)
 
-Para habilitar o consumidor e o publisher SQS local, configure estas variaveis no ambiente da aplicacao (por exemplo, em `.env`):
+O projeto usa estas variaveis para habilitar o consumidor e o publisher SQS local:
 
 ```env
 SQS_ENABLED=true
@@ -66,17 +80,11 @@ SQS_ENDPOINT=http://localhost:4566
 AWS_REGION=us-east-1
 ```
 
-Use `.env.example` como base para a configuracao local. Em AWS, remova `SQS_ENDPOINT`, configure as URLs das tres filas e forneca credenciais por IAM role ou pela cadeia padrao do AWS SDK.
-
-Crie o arquivo `.env` a partir do exemplo antes de iniciar a aplicacao:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Na primeira conexao, a aplicacao cria as filas FIFO `wager-transactions.fifo`, `wager-transactions-dlq.fifo` e `wager-events.fifo` no MiniStack. Mensagens invalidas vao para a DLQ; mensagens com falha transitoria sao tentadas novamente pela politica de redrive.
+Em AWS, remova `SQS_ENDPOINT`, configure as URLs das tres filas e forneca credenciais por IAM role ou pela cadeia padrao do AWS SDK.
 
 ### 4.3. Executar as migrations do banco de dados
+
+
 
 ```bash
 bun mikro-orm migration:up
