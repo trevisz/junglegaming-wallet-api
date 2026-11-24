@@ -9,7 +9,15 @@ import * as crypto from 'crypto';
 
 @Injectable()
 export class HmacSignatureGuard implements CanActivate {
-  private readonly secret = process.env.HMAC_SECRET || '[REDACTED]';
+  private readonly secret: string;
+
+  constructor() {
+    const secret = process.env.HMAC_SECRET;
+    if (!secret || !secret.trim()) {
+      throw new Error('Missing required environment variable: HMAC_SECRET');
+    }
+    this.secret = secret;
+  }
 
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<Request>();
