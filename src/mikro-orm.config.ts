@@ -10,11 +10,19 @@ import { WalletLedgerEntryEntity } from './infrastructure/database/entities/wall
 import { InboxMessageEntity } from './infrastructure/database/entities/inbox-message.entity';
 import { OutboxMessageEntity } from './infrastructure/database/entities/outbox-message.entity';
 
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value || !value.trim()) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
 const config: Options = defineConfig({
   host: process.env.DB_HOST || 'localhost',
   port: Number(process.env.DB_PORT) || 5432,
   user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD,
+  password: requiredEnv('DB_PASSWORD'),
   dbName: process.env.DB_NAME || 'jungle_wagering',
   entities: [
     WalletEntity,
