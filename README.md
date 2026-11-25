@@ -266,7 +266,7 @@ bun run test:integration
 A suite sobe tres processos da aplicacao e usa filas FIFO exclusivas. Ela verifica 50 entregas SQS duplicadas, 50 requisicoes HTTP idempotentes em paralelo, disputa de saldo, wallets paralelas, BET/WIN/LOSS/REFUND/ROLLBACK, conflito de moeda, rollback fora de ordem, Outbox, reinicio/redelivery, retries com falha transitoria, DLQ e constraints do schema. Fora do modo de integracao, esses testes ficam ignorados.
 
 ### Testes manuais via Postman
-Importe `postman/JungleGaming-Wallet-API.postman_collection.json`, confirme `baseUrl` como `http://localhost:3000` e rode a colecao na ordem. A API deve estar iniciada com PostgreSQL e SQS habilitados; a colecao valida wallet, idempotencia, operacoes financeiras, rejeicoes, ledger e reconciliacao.
+Importe `postman/Wallet-API.postman_collection.json`, confirme `baseUrl` como `http://localhost:3000` e rode a colecao na ordem. A API deve estar iniciada com PostgreSQL e SQS habilitados; a colecao valida wallet, idempotencia, operacoes financeiras, rejeicoes, ledger e reconciliacao.
 
 Para habilitar o envio das metricas de negocio ao NestJS Observe, execute `npx @nestjs/observe link` e mantenha as credenciais fora do repositorio.
 
